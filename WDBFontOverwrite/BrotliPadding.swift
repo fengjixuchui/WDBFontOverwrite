@@ -167,21 +167,12 @@ func repackWoff2Font(input: Data) throws -> Data {
       }
     }
   }
-  // ok here's the Brotli data
-  let brotliDataArray = [UInt8](
-    input[tableEnd..<tableEnd + Int(header.totalCompressedSize.bigEndian)])
-  // https://developer.apple.com/documentation/accelerate/compressing_and_decompressing_data_with_buffer_compression
-  let decodedCapacity = Int(header.totalSfntSize.bigEndian) + (1 * 1024 * 1024)
-  let decodedDestinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: decodedCapacity)
-  let decodedCharCount = compression_decode_buffer(
-    decodedDestinationBuffer, decodedCapacity,
-    brotliDataArray, brotliDataArray.count,
-    nil,
-    COMPRESSION_BROTLI)
-  if decodedCharCount <= 0 {
-    throw RepackWoff2FontError.malformedInputWoff
-  }
-  let decodedData = Data(bytes: decodedDestinationBuffer, count: decodedCharCount)
+
+  // hack: we made a fake Brotli that just returns the uncompresssed input directly
+  // so instead of compressed data we get the uncompressed data directly
+  // (See repackfonts/BrotliPadding.swift for how to decode Brotli properly)
+  let decodedData =
+    input.subdata(in: tableEnd..<tableEnd + Int(header.totalCompressedSize.bigEndian))
 
   let recompressedData = try packageInBrotliSkippingLastByteOfPage(
     input: decodedData, startingAddress: tableEnd)
@@ -207,17 +198,3 @@ func repackWoff2Font(input: Data) throws -> Data {
   }
   return outputData
 }
-
-func main() {
-  guard CommandLine.arguments.count == 3 else {
-    print("usage: BrotliPadding input.woff2 output.woff2")
-    return
-  }
-
-  let inputData = try! Data(
-    contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
-  let myData = try! repackWoff2Font(input: inputData)
-  try! myData.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
-}
-
-main()

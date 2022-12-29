@@ -34,21 +34,73 @@ let fonts = [
     name: "Choco Cooky", postScriptName: "Chococooky", repackedPath: "Chococooky.woff2"),
 ]
 
+struct CustomFont {
+  var name: String
+  var targetPath: String
+  var localPath: String
+}
+
+let customFonts = [
+  CustomFont(
+    name: "SFUI.ttf", targetPath: "/System/Library/Fonts/CoreUI/SFUI.ttf",
+    localPath: "CustomSFUI.woff2"),
+  CustomFont(
+    name: "Emoji", targetPath: "/System/Library/Fonts/CoreAddition/AppleColorEmoji-160px.ttc",
+    localPath: "CustomAppleColorEmoji.woff2"),
+  CustomFont(
+    name: "PingFang.ttc", targetPath: "/System/Library/Fonts/LanguageSupport/PingFang.ttc",
+    localPath: "CustomPingFang.woff2"),
+]
+
 struct ContentView: View {
   @State private var message = "Choose a font."
+  @State private var progress: Progress!
   var body: some View {
-    VStack {
-      Text(message).padding(16)
-      ForEach(fonts, id: \.name) { font in
-        Button(action: {
-          message = "Running"
-          overwriteWithFont(name: font.repackedPath) {
-            message = $0
-          }
-        }) {
-          Text(font.name).font(.custom(font.postScriptName, size: 18))
-        }.padding(8)
+    ScrollView {
+      VStack {
+        Text(message).padding(8)
+        if let progress = progress {
+          ProgressView(progress)
+        }
+        ForEach(fonts, id: \.name) { font in
+          Button(action: {
+            message = "Running"
+            progress = Progress(totalUnitCount: 1)
+            overwriteWithFont(name: font.repackedPath, progress: progress) {
+              message = $0
+              progress = nil
+            }
+          }) {
+            Text(font.name).font(.custom(font.postScriptName, size: 18))
+          }.padding(8)
+        }
+        Divider()
+        ForEach(customFonts, id: \.name) { font in
+          Button(action: {
+            message = "Running"
+            progress = Progress(totalUnitCount: 1)
+            overwriteWithCustomFont(
+              name: font.localPath, targetName: font.targetPath, progress: progress
+            ) {
+              message = $0
+              progress = nil
+            }
+          }) {
+            Text("Custom \(font.name)")
+          }.padding(8)
+          Button(action: {
+            message = "Importing..."
+            importCustomFont(name: font.localPath) {
+              message = $0
+            }
+          }) {
+            Text("Import custom \(font.name)")
+          }.padding(8)
+        }
       }
+      Text(
+        "Custom fonts require font files that are ported for iOS.\nSee https://github.com/zhuowei/WDBFontOverwrite for details."
+      ).font(.system(size: 12))
     }
   }
 }

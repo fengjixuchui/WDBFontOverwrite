@@ -6,10 +6,22 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
 
-func overwriteWithFont(name: String, completion: @escaping (String) -> Void) {
+func overwriteWithFont(name: String, progress: Progress, completion: @escaping (String) -> Void) {
+  let fontURL = Bundle.main.url(
+    forResource: name, withExtension: nil, subdirectory: "RepackedFonts")!
+  overwriteWithFont(
+    fontURL: fontURL, pathToTargetFont: "/System/Library/Fonts/CoreUI/SFUI.ttf", progress: progress,
+    completion: completion)
+}
+
+func overwriteWithFont(
+  fontURL: URL, pathToTargetFont: String, progress: Progress, completion: @escaping (String) -> Void
+) {
   DispatchQueue.global(qos: .userInteractive).async {
-    let succeeded = overwriteWithFontImpl(name: name)
+    let succeeded = overwriteWithFontImpl(
+      fontURL: fontURL, pathToTargetFont: pathToTargetFont, progress: progress)
     DispatchQueue.main.async {
       completion(succeeded ? "Success: force close an app to see results" : "Failed")
     }
@@ -19,11 +31,8 @@ func overwriteWithFont(name: String, completion: @escaping (String) -> Void) {
 /// Overwrite the system font with the given font using CVE-2022-46689.
 /// The font must be specially prepared so that it skips past the last byte in every 16KB page.
 /// See BrotliPadding.swift for an implementation that adds this padding to WOFF2 fonts.
-func overwriteWithFontImpl(name: String) -> Bool {
-  let urlToFont = Bundle.main.url(
-    forResource: name, withExtension: nil, subdirectory: "RepackedFonts")!
-  var fontData = try! Data(contentsOf: urlToFont)
-  let pathToTargetFont = "/System/Library/Fonts/CoreUI/SFUI.ttf"
+func overwriteWithFontImpl(fontURL: URL, pathToTargetFont: String, progress: Progress) -> Bool {
+  var fontData = try! Data(contentsOf: fontURL)
   #if false
     let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[
       0
@@ -76,8 +85,17 @@ func overwriteWithFontImpl(name: String) -> Bool {
     return false
   }
 
+  // TODO(zhuowei): probably not the right way to use NSProgress...
+  let overwriteProgress = Progress(totalUnitCount: Int64(fontData.count))
+  progress.addChild(overwriteProgress, withPendingUnitCount: Int64(1))
+
   // for every 16k chunk, rewrite
+  print(Date())
   for chunkOff in stride(from: 0, to: fontData.count, by: 0x4000) {
+    print(String(format: "%lx", chunkOff))
+    if chunkOff % 0x40000 == 0 {
+      overwriteProgress.completedUnitCount = Int64(chunkOff)
+    }
     // we only rewrite 16383 bytes out of every 16384 bytes.
     let dataChunk = fontData[chunkOff..<min(fontData.count, chunkOff + 0x3fff)]
     var overwroteOne = false
@@ -91,14 +109,15 @@ func overwriteWithFontImpl(name: String) -> Bool {
         break
       }
       print("try again?!")
-      sleep(1)
     }
     guard overwroteOne else {
       print("can't overwrite")
       return false
     }
   }
+  print(Date())
   print("successfully overwrote everything")
+  overwriteProgress.completedUnitCount = Int64(fontData.count)
   return true
 }
 
@@ -110,4 +129,137 @@ func dumpCurrentFont() {
   let pathToRealTargetFont = "/System/Library/Fonts/CoreUI/SFUI.ttf"
   let origData = try! Data(contentsOf: URL(fileURLWithPath: pathToRealTargetFont))
   try! origData.write(to: URL(fileURLWithPath: pathToTargetFont))
+}
+
+func overwriteWithCustomFont(
+  name: String, targetName: String,
+  progress: Progress,
+  completion: @escaping (String) -> Void
+) {
+  let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[
+    0
+  ]
+  let fontURL = documentDirectory.appendingPathComponent(name)
+  guard FileManager.default.fileExists(atPath: fontURL.path) else {
+    completion("No custom font imported")
+    return
+  }
+  overwriteWithFont(
+    fontURL: fontURL, pathToTargetFont: targetName, progress: progress, completion: completion)
+}
+
+class WDBImportCustomFontPickerViewControllerDelegate: NSObject, UIDocumentPickerDelegate {
+  let completion: ([URL]?) -> Void
+  init(completion: @escaping ([URL]?) -> Void) {
+    self.completion = completion
+  }
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL])
+  {
+    completion(urls)
+  }
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    completion(nil)
+  }
+}
+
+var globalDelegate: WDBImportCustomFontPickerViewControllerDelegate?
+
+func importCustomFont(name: String, completion: @escaping (String) -> Void) {
+  // yes I should use a real SwiftUI way to this, but #yolo
+  let pickerViewController = UIDocumentPickerViewController(forOpeningContentTypes: [
+    UTType.font, UTType(filenameExtension: "woff2", conformingTo: .font)!,
+  ])
+  let delegate = WDBImportCustomFontPickerViewControllerDelegate { urls in
+    globalDelegate = nil
+    guard let urls = urls else {
+      completion("Cancelled")
+      return
+    }
+    guard urls.count == 1 else {
+      completion("import one file at a time")
+      return
+    }
+    DispatchQueue.global(qos: .userInteractive).async {
+      let fileURL = urls[0]
+      guard fileURL.startAccessingSecurityScopedResource() else {
+        DispatchQueue.main.async {
+          completion("startAccessingSecurityScopedResource false?")
+        }
+        return
+      }
+      let documentDirectory = FileManager.default.urls(
+        for: .documentDirectory, in: .userDomainMask)[
+          0
+        ]
+      let targetURL = documentDirectory.appendingPathComponent(name)
+      let success = importCustomFontImpl(fileURL: fileURL, targetURL: targetURL)
+      fileURL.stopAccessingSecurityScopedResource()
+      DispatchQueue.main.async {
+        completion(success ?? "Imported")
+      }
+    }
+  }
+  pickerViewController.delegate = delegate
+  // I said this is yolo
+  globalDelegate = delegate
+  (UIApplication.shared.connectedScenes.first! as! UIWindowScene).windows[0].rootViewController!
+    .present(pickerViewController, animated: true)
+}
+
+func importCustomFontImpl(fileURL: URL, targetURL: URL) -> String? {
+  // read first 16k of font
+  let fileHandle = try! FileHandle(forReadingFrom: fileURL)
+  defer { fileHandle.closeFile() }
+  let first16k = try! fileHandle.read(upToCount: 0x4000)!
+  if first16k.count == 0x4000 && first16k[0..<4] == Data([0x77, 0x4f, 0x46, 0x32])
+    && first16k[0x3fff] == 0x41
+  {
+    print("already padded WOFF2")
+    try? FileManager.default.removeItem(at: targetURL)
+    try! FileManager.default.copyItem(at: fileURL, to: targetURL)
+    return nil
+  }
+  try! fileHandle.seek(toOffset: 0)
+  let fileData = try! fileHandle.readToEnd()!
+  guard let repackedData = repackTrueTypeFontAsPaddedWoff2(input: fileData) else {
+    return "Failed to repack"
+  }
+  try! repackedData.write(to: targetURL)
+  return nil
+}
+
+func repackTrueTypeFontAsPaddedWoff2(input: Data) -> Data? {
+  var outputBuffer = [UInt8](repeating: 0, count: input.count + 1024)
+  var outputLength = outputBuffer.count
+  let woff2Result = outputBuffer.withUnsafeMutableBytes {
+    WOFF2WrapperConvertTTFToWOFF2([UInt8](input), input.count, $0.baseAddress, &outputLength)
+  }
+  guard woff2Result else {
+    print("woff2 convert failed")
+    return nil
+  }
+  let woff2Data = Data(bytes: outputBuffer, count: outputLength)
+  do {
+    return try repackWoff2Font(input: woff2Data)
+  } catch {
+    print("error: \(error).")
+    return nil
+  }
+}
+
+// Hack: fake Brotli compress method that just returns the original uncompressed data.'
+// (We're recompressing it anyways in a second!)
+@_cdecl("BrotliEncoderCompress")
+func fakeBrotliEncoderCompress(
+  quality: Int, lgwin: Int, mode: Int, inputSize: size_t, inputBuffer: UnsafePointer<UInt8>,
+  encodedSize: UnsafeMutablePointer<size_t>, encodedBuffer: UnsafeMutablePointer<UInt8>
+) -> Int {
+  let encodedSizeIn = encodedSize.pointee
+  if inputSize > encodedSizeIn {
+    return 0
+  }
+  UnsafeBufferPointer(start: inputBuffer, count: inputSize).copyBytes(
+    to: UnsafeMutableRawBufferPointer(start: encodedBuffer, count: encodedSizeIn))
+  encodedSize[0] = inputSize
+  return 1
 }
